@@ -45,8 +45,7 @@
 // 基础库
 #include <Arduino.h>
 #include <Wire.h>
-#include <Servo.h>
-#include <ezButton.h>
+#include <DFRobot_Servo.h>
 #include "DFRobot_HX711_I2C.h"
 #include "MPython.h"
 #include "DFRobot_Iot.h"
@@ -111,7 +110,6 @@ enum SoundPattern
 
 // 创建对象
 Servo feedServo;
-ezButton button(BUTTON_PIN); // 创建按钮对象
 DFRobot_HX711_I2C bowlScale(&Wire, HX711_I2C_ADDR);
 
 // 份量相关
@@ -130,7 +128,6 @@ float remainingFood = INITIAL_FOOD_AMOUNT; // 剩余储粮量
 
 // 喂食计时
 unsigned long lastFeedingTime = 0; // 上次喂食时间
-unsigned long feedingCount = 0;    // 喂食次数计数
 
 // 创建IoT对象
 DFRobot_Iot myIot;
@@ -147,6 +144,30 @@ unsigned long lastConnectionAttempt = 0;
 unsigned long connectionEstablishedTime = 0;
 int reconnectAttempts = 0;
 unsigned long currentRetryDelay = INITIAL_RETRY_DELAY;
+
+// 声明变量
+unsigned long lastPetVisitTime = 0;
+
+// 假设 buttonA 和 buttonB 是某种按钮类的实例
+Button buttonA;
+Button buttonB;
+
+// 假设 display 是种显示类的实例
+Display display;
+
+// 移动显示相关函数到一起
+void displayMessage(const char *line1, const char *line2 = "")
+{
+    display.fillScreen(0); // 清屏
+    display.setCursor(0, 0);
+    display.print(line1); // 第一行文字
+    if (strlen(line2) > 0)
+    {
+        display.setCursor(0, 16);
+        display.print(line2); // ���二行文字
+    }
+    display.show(); // 显示
+}
 
 // 网络连接管理类
 class NetworkManager
@@ -305,7 +326,7 @@ void feed()
     if (remainingFood <= MIN_STORAGE_WEIGHT)
     {
         playSound(ALERT_FOOD_LOW);
-        displayMessage("储粮不足", "请及时补充");
+        displayMessage("���粮不", "请及时补充");
         return;
     }
 
@@ -345,11 +366,10 @@ void checkFeedingTime()
     {
         feed();
         lastFeedingTime = currentTime;
-        feedingCount++;
 
         // 显示喂食次数
         char countStr[32];
-        sprintf(countStr, "第%lu次喂食", feedingCount);
+        sprintf(countStr, "第%lu次喂食", (currentTime - lastFeedingTime) / FEEDING_INTERVAL);
         displayMessage(countStr);
         delay(2000);
     }
@@ -412,23 +432,6 @@ void resetFoodAmount()
     digitalWrite(BUZZER_PIN, LOW);
 }
 
-// 移动显示相关函数到一起
-void displayMessage(const char *line1, const char *line2 = "")
-{
-    display.fill(0)                  // 清屏
-        display.text(line1, 0, 0, 1) // 第一行文字
-        if (strlen(line2) > 0){
-            display.text(line2, 0, 16, 1) // 第二行文字
-        } display.show()                  // 显示
-}
-
-void displayError(const char *message)
-{
-    display.fill(0)
-        display.text("错误:", 0, 0, 1)
-            display.text(message, 0, 16, 1)
-                display.show()
-}
 
 // 移动按钮处理相关函数到一起
 void handleButton()
@@ -436,8 +439,8 @@ void handleButton()
     static bool isLongPress = false;
     static unsigned long pressStartTime = 0;
 
-    // 按钮被按下
-    if (button.isPressed())
+    // 使用掌控板内建的ButtonA和ButtonB
+    if (digitalRead(BUTTON_PIN) == LOW) // 检测P0引脚的单击
     {
         if (pressStartTime == 0)
         {
@@ -451,64 +454,46 @@ void handleButton()
             calibrateScale();
         }
     }
-
-    // 按钮被释放
-    if (button.isReleased())
+    else if (pressStartTime != 0) // 按钮被释放
     {
         unsigned long pressDuration = millis() - pressStartTime;
 
-        // 如果不是长按，则处理点击
+        // 如果不是长按，则处理单击
         if (!isLongPress && pressDuration < LONG_PRESS_TIME)
         {
-            if (millis() - lastReleaseTime > CLICK_TIMEOUT)
-            {
-                clickCounter = 0;
-            }
-
-            clickCounter++;
-            lastReleaseTime = millis();
-
-            // 处理点击次数
-            if (clickCounter == 1)
-            {
-                // 等待可能的多击
-                delay(CLICK_TIMEOUT);
-
-                // 根据最终点击次数执行操作
-                switch (clickCounter)
-                {
-                case 1: // 单击
-                    feed();
-                    break;
-                case 2: // 双击
-                    adjustPortion();
-                    break;
-                case 3: // 三连击
-                    resetFoodAmount();
-                    break;
-                }
-                clickCounter = 0;
-            }
+            feed(); // 单击执行喂食
         }
 
         // 重置状态
         pressStartTime = 0;
         isLongPress = false;
     }
+
+    // 使用ButtonA的单击替代双连击功能
+    if (buttonA.isPressed())
+    {
+        adjustPortion();
+    }
+
+    // 使用ButtonB的单击替代三连击功能
+    if (buttonB.isPressed())
+    {
+        resetFoodAmount();
+    }
 }
 
 // 移动传感器相关函数到一起
 void checkPetApproach()
 {
-    // 使用掌控板原生的超声波函数测量距离
-    float distance = sonar_distance(TRIG_PIN, ECHO_PIN);
+    // 使用MPython库中的超声波测距函数
+    float distance = ultrasonicDistance(TRIG_PIN, ECHO_PIN);
 
     // 如果距离在有效范围内且小于阈值，说明宠物接近
     if (distance > 0 && distance < DISTANCE_THRESHOLD)
     {
         if (millis() - lastApproachTime > APPROACH_COOLDOWN)
         {
-            lastPetVisitTime = rtc.now(); // 更新最后访问时间
+            lastPetVisitTime = millis(); // 更新最后访问时间
             approachCount++;
             lastApproachTime = millis();
 
@@ -521,10 +506,8 @@ void checkPetApproach()
 
 void checkPetAbsence()
 {
-    static unsigned long lastVisitMillis = 0;
-
     // 使用超声波检测宠物
-    float distance = sonar_distance(TRIG_PIN, ECHO_PIN);
+    float distance = ultrasonicDistance(TRIG_PIN, ECHO_PIN);
     if (distance > 0 && distance < DISTANCE_THRESHOLD)
     {
         lastVisitMillis = millis();
@@ -638,72 +621,43 @@ void playSound(SoundPattern pattern)
     }
 }
 
-// IoT连接函数
-void connectToIot()
-{
-    displayMessage("正在连接WiFi...");
-
-    if (myIot.wifiConnect(WIFI_SSID, WIFI_PASSWORD))
-    {
-        displayMessage("WiFi已连接", "正在连接IoT...");
-
-        if (myIot.init(IOT_ID, IOT_PWD))
-        {
-            // 订阅主题
-            myIot.subscribe(TOPIC_FEED);
-            myIot.subscribe(TOPIC_PORTION);
-
-            isOnline = true;
-            displayMessage("在线模式", "IoT已连接");
-        }
-        else
-        {
-            isOnline = false;
-            displayMessage("离线模式", "IoT连接失败");
-        }
-    }
-    else
-    {
-        isOnline = false;
-        displayMessage("离线模式", "WiFi连接失败");
-    }
-
-    delay(2000); // 显示状态2秒
-}
-
 // 修改显示函数以包含在线状态
 void displayStatus()
 {
-    display.fill(0) // 清屏
+    display.fillScreen(0); // 清屏
 
-        // 第一行：时间和在线状态
-        char timeStr[32];
+    // 第一行：时间和在线状态
+    char timeStr[32];
     sprintf(timeStr, "%02d:%02d %s [%s]",
             (millis() / 3600000) % 24,
             (millis() / 60000) % 60,
             getCurrentPortionText(),
             isOnline ? "在线" : "离线");
-    display.text(timeStr, 0, 0, 1)
+    display.setCursor(0, 0);
+    display.print(timeStr);
 
-        // 第二行：储粮信息
-        char statusStr[32];
+    // 第二行：储粮信息
+    char statusStr[32];
     sprintf(statusStr, "储粮:%dg", (int)remainingFood);
-    display.text(statusStr, 0, 16, 1)
+    display.setCursor(0, 16);
+    display.print(statusStr);
 
-        // 第三行：宠物状态
-        char petStr[32];
+    // 第三行：宠物状态
+    char petStr[32];
     sprintf(petStr, "上次:%d分钟前", (millis() - lastPetVisitTime) / 60000);
-    display.text(petStr, 0, 32, 1)
+    display.setCursor(0, 32);
+    display.print(petStr);
 
-        // 第四行：网络状态
-        if (!isOnline && reconnectAttempts > 0)
+    // 第四行：网络状态
+    if (!isOnline && reconnectAttempts > 0)
     {
         char reconnectStr[32];
         sprintf(reconnectStr, "重连:%d次", reconnectAttempts);
-        display.text(reconnectStr, 0, 48, 1)
+        display.setCursor(0, 48);
+        display.print(reconnectStr);
     }
 
-    display.show() // 更新显示
+    display.show(); // 更新显示
 }
 
 // IoT消息处理函数
@@ -762,12 +716,12 @@ void setup()
     Serial.begin(115200);
     Wire.begin();
 
-    // 初始化显示
+    // 始化显示
     display.begin()     // 初始化显示
         display.fill(0) // 清屏
         display.show()
 
-            feedServo.attach(SERVO_PIN);
+    feedServo.attach(SERVO_PIN);
     feedServo.write(0);
 
     while (!bowlScale.begin())
@@ -785,9 +739,6 @@ void setup()
     pinMode(TRIG_PIN, OUTPUT);
     pinMode(ECHO_PIN, INPUT);
 
-    button.setDebounceTime(DEBOUNCE_TIME);
-    button.setCountMode(COUNT_FALLING);
-
     displayMessage("宠物喂食器", "系统就绪");
     playSound(SOUND_FEED_SUCCESS);
 
@@ -800,7 +751,7 @@ void setup()
 void loop()
 {
     // 1. 更新系统状态
-    button.loop();
+    handleButton(); // 调用新的按钮处理函数
     unsigned long runTime = millis();
 
     // 网络管理
@@ -824,14 +775,6 @@ void loop()
     displayStatus();
 
     // 2. 显示信息
-    unsigned long runHours = (runTime / 3600000) % 24;
-    unsigned long runMinutes = (runTime / 60000) % 60;
-    char timeStr[32];
-    sprintf(timeStr, "%02lu:%02lu %s",
-            runHours, runMinutes, getCurrentPortionText());
-    displayMessage(timeStr);
-
-    // 3. 检查各种事件
     checkFeedingTime();
     checkPetApproach();
     checkPetAbsence();
