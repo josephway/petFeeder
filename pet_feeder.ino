@@ -23,10 +23,11 @@
  *    - 在线状态：支持WiFi连接，可远程监控设备状态
  *
  * 3. 按键操作
- *    - 单击：执行喂食
- *    - 双击：切换份量（小份/中份/大份）
- *    - 三连击：重置储粮量
- *    - 长按：进入称重校准模式
+ *    - P0按键：
+ *      短按：执行喂食
+ *      长按：进入称重校准模式
+ *    - ButtonA：切换份量（小份/中份/大份）
+ *    - ButtonB：重置储粮量
  *
  * 4. 网络功能
  *    - 远程控制：支持远程触发喂食和调整份量
@@ -49,6 +50,7 @@
 #include "DFRobot_HX711_I2C.h"
 #include "MPython.h"
 #include "DFRobot_Iot.h"
+#include "DFRobot_URM10.h"
 
 // IoT配置
 #define IOT_ID "你的设备ID"
@@ -101,7 +103,7 @@
 enum SoundPattern
 {
     ALERT_FOOD_LOW,       // 储粮不足警告
-    ALERT_BOWL_FULL,      // 食盆已满警告
+    ALERT_BOWL_FULL,      // 食盆已警告
     ALERT_PET_ABSENT,     // 宠物离开警告
     ALERT_HARDWARE_ERROR, // 硬件错误警告
     SOUND_FEED_SUCCESS,   // 喂食成功提示
@@ -122,8 +124,6 @@ enum FoodPortion
 FoodPortion currentPortion = MEDIUM;
 
 // 按钮状态变量
-unsigned long lastReleaseTime = 0;
-int clickCounter = 0;
 float remainingFood = INITIAL_FOOD_AMOUNT; // 剩余储粮量
 
 // 喂食计时
@@ -133,167 +133,16 @@ unsigned long lastFeedingTime = 0; // 上次喂食时间
 DFRobot_Iot myIot;
 
 // 网络状态管理
-#define MAX_RECONNECT_ATTEMPTS 5      // 最大重连次数
-#define INITIAL_RETRY_DELAY 5000      // 初始重试延迟(5秒)
-#define MAX_RETRY_DELAY 300000        // 最大重试延迟(5分钟)
-#define STABLE_CONNECTION_TIME 300000 // 稳定连接时间(5分钟)
+#define RECONNECT_INTERVAL 3600000 // 重连间隔(1小时)
 
 // 网络状态变量
 bool isOnline = false;
 unsigned long lastConnectionAttempt = 0;
-unsigned long connectionEstablishedTime = 0;
-int reconnectAttempts = 0;
-unsigned long currentRetryDelay = INITIAL_RETRY_DELAY;
 
-// 声明变量
-unsigned long lastPetVisitTime = 0;
+// 创建URM10对象
+DFRobot_URM10 urm10;
 
-// 假设 buttonA 和 buttonB 是某种按钮类的实例
-Button buttonA;
-Button buttonB;
-
-// 假设 display 是种显示类的实例
-Display display;
-
-// 移动显示相关函数到一起
-void displayMessage(const char *line1, const char *line2 = "")
-{
-    display.fillScreen(0); // 清屏
-    display.setCursor(0, 0);
-    display.print(line1); // 第一行文字
-    if (strlen(line2) > 0)
-    {
-        display.setCursor(0, 16);
-        display.print(line2); // ���二行文字
-    }
-    display.show(); // 显示
-}
-
-// 网络连接管理类
-class NetworkManager
-{
-private:
-    unsigned long lastStatusCheck = 0;
-    bool wasOnline = false;
-
-public:
-    // 检查并管理网络连接
-    void manage()
-    {
-        unsigned long currentTime = millis();
-
-        // 定期检查连接状态
-        if (currentTime - lastStatusCheck >= 10000)
-        { // 每10秒检查一次
-            lastStatusCheck = currentTime;
-
-            if (isOnline != wasOnline)
-            {
-                wasOnline = isOnline;
-                if (isOnline)
-                {
-                    onConnectionEstablished();
-                }
-                else
-                {
-                    onConnectionLost();
-                }
-            }
-
-            // 检查连接是否稳定
-            if (isOnline && connectionEstablishedTime > 0)
-            {
-                if (currentTime - connectionEstablishedTime >= STABLE_CONNECTION_TIME)
-                {
-                    // 连接稳定，重置重连参数
-                    resetReconnectionParams();
-                }
-            }
-        }
-
-        // 处理重连
-        if (!isOnline && shouldAttemptReconnection(currentTime))
-        {
-            attemptReconnection();
-        }
-    }
-
-private:
-    // 重置重连参数
-    void resetReconnectionParams()
-    {
-        reconnectAttempts = 0;
-        currentRetryDelay = INITIAL_RETRY_DELAY;
-    }
-
-    // 判断是否应该尝试重连
-    bool shouldAttemptReconnection(unsigned long currentTime)
-    {
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS)
-        {
-            // 达到最大重试次数，增加延迟
-            if (currentTime - lastConnectionAttempt >= currentRetryDelay)
-            {
-                currentRetryDelay = min(currentRetryDelay * 2, MAX_RETRY_DELAY);
-                reconnectAttempts = 0;
-                return true;
-            }
-        }
-        else if (currentTime - lastConnectionAttempt >= currentRetryDelay)
-        {
-            return true;
-        }
-        return false;
-    }
-
-    // 尝试重新连接
-    void attemptReconnection()
-    {
-        lastConnectionAttempt = millis();
-        reconnectAttempts++;
-
-        displayMessage("重新连接中...",
-                       String("第" + String(reconnectAttempts) + "次尝试").c_str());
-
-        if (connectToIot())
-        {
-            isOnline = true;
-            connectionEstablishedTime = millis();
-        }
-        else
-        {
-            isOnline = false;
-        }
-    }
-
-    // 连接建立时的处理
-    void onConnectionEstablished()
-    {
-        displayMessage("网络已连接", "同步中...");
-        connectionEstablishedTime = millis();
-
-        // 立即上报状态
-        reportStatus();
-
-        // 重新订阅主题
-        myIot.subscribe(TOPIC_FEED);
-        myIot.subscribe(TOPIC_PORTION);
-    }
-
-    // 连接断开时的处理
-    void onConnectionLost()
-    {
-        displayMessage("网络已断开", "切换离线模式");
-        connectionEstablishedTime = 0;
-
-        // 可以在这里添加其他断线处理逻辑
-    }
-};
-
-// 创建网络管理器实例
-NetworkManager networkManager;
-
-// 修改连接函数
+// 连接函数
 bool connectToIot()
 {
     if (myIot.wifiConnect(WIFI_SSID, WIFI_PASSWORD))
@@ -303,10 +152,43 @@ bool connectToIot()
 
         if (myIot.init(IOT_ID, IOT_PWD))
         {
+            isOnline = true;
+            // 连接成功后订阅主题
+            myIot.subscribe(TOPIC_FEED);
+            myIot.subscribe(TOPIC_PORTION);
+            displayMessage("网络已连接", "在线模式");
             return true;
         }
     }
+
+    isOnline = false;
+    displayMessage("网络未连接", "离线���式");
     return false;
+}
+
+// 网络管理函数
+void manageConnection()
+{
+    if (!isOnline && millis() - lastConnectionAttempt >= RECONNECT_INTERVAL)
+    {
+        lastConnectionAttempt = millis();
+        displayMessage("尝试重连中...");
+        connectToIot();
+    }
+}
+
+// 显示相关函数
+void displayMessage(const char *line1, const char *line2 = "")
+{
+    display.fillScreen(0); // 清屏
+    display.setCursor(0, 0);
+    display.print(line1); // 第一行文字
+    if (strlen(line2) > 0)
+    {
+        display.setCursor(0, 16);
+        display.print(line2); // 二行文字
+    }
+    display.show(); // 显示
 }
 
 // 2. 核心功能函数
@@ -326,7 +208,7 @@ void feed()
     if (remainingFood <= MIN_STORAGE_WEIGHT)
     {
         playSound(ALERT_FOOD_LOW);
-        displayMessage("���粮不", "请及时补充");
+        displayMessage("储粮不足", "请及时补充");
         return;
     }
 
@@ -432,7 +314,6 @@ void resetFoodAmount()
     digitalWrite(BUZZER_PIN, LOW);
 }
 
-
 // 移动按钮处理相关函数到一起
 void handleButton()
 {
@@ -440,7 +321,7 @@ void handleButton()
     static unsigned long pressStartTime = 0;
 
     // 使用掌控板内建的ButtonA和ButtonB
-    if (digitalRead(BUTTON_PIN) == LOW) // 检测P0引脚的单击
+    if (digitalRead(BUTTON_PIN) == LOW) // 检测P0引脚单击
     {
         if (pressStartTime == 0)
         {
@@ -483,9 +364,14 @@ void handleButton()
 }
 
 // 移动传感器相关函数到一起
+float ultrasonicDistance(int trigPin, int echoPin)
+{
+    float distance = urm10.getDistanceCM();
+    return (distance > 0 && distance < MAX_DISTANCE) ? distance : -1;
+}
+
 void checkPetApproach()
 {
-    // 使用MPython库中的超声波测距函数
     float distance = ultrasonicDistance(TRIG_PIN, ECHO_PIN);
 
     // 如果距离在有效范围内且小于阈值，说明宠物接近
@@ -499,14 +385,13 @@ void checkPetApproach()
 
             // 显示检测到宠物
             displayMessage("检测到宠物",
-                           String("距离: " + String(distance, 1) + "cm").c_str());
+                           String("距: " + String(distance, 1) + "cm").c_str());
         }
     }
 }
 
 void checkPetAbsence()
 {
-    // 使用超声波检测宠物
     float distance = ultrasonicDistance(TRIG_PIN, ECHO_PIN);
     if (distance > 0 && distance < DISTANCE_THRESHOLD)
     {
@@ -602,7 +487,7 @@ void playSound(SoundPattern pattern)
         break;
 
     case SOUND_FEED_SUCCESS:
-        // 喂食成功：一短音
+        // 喂食成功：一音
         digitalWrite(BUZZER_PIN, HIGH);
         delay(200);
         digitalWrite(BUZZER_PIN, LOW);
@@ -648,13 +533,11 @@ void displayStatus()
     display.setCursor(0, 32);
     display.print(petStr);
 
-    // 第四行：网络状态
-    if (!isOnline && reconnectAttempts > 0)
+    // 第四行：简化的网络状态显示
+    if (!isOnline)
     {
-        char reconnectStr[32];
-        sprintf(reconnectStr, "重连:%d次", reconnectAttempts);
         display.setCursor(0, 48);
-        display.print(reconnectStr);
+        display.print("离线模式");
     }
 
     display.show(); // 更新显示
@@ -721,7 +604,7 @@ void setup()
         display.fill(0) // 清屏
         display.show()
 
-    feedServo.attach(SERVO_PIN);
+            feedServo.attach(SERVO_PIN);
     feedServo.write(0);
 
     while (!bowlScale.begin())
@@ -746,16 +629,19 @@ void setup()
 
     // 尝试连接Easy IoT
     connectToIot();
+
+    // 初始化URM10
+    urm10.begin(TRIG_PIN, ECHO_PIN);
 }
 
 void loop()
 {
     // 1. 更新系统状态
-    handleButton(); // 调用新的按钮处理函数
+    handleButton(); // 调用按钮处理函数
     unsigned long runTime = millis();
 
     // 网络管理
-    networkManager.manage();
+    manageConnection();
 
     // 仅在在线状态下处理IoT消息
     if (isOnline)
