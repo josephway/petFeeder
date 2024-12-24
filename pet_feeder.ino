@@ -14,7 +14,7 @@
  * 1. 自动喂食
  *    - 定时喂食：每8小时自动投放一次
  *    - 手动喂食：通过按钮触发或远程IoT控制
- *    - 可调节份量：支持小份(20g)、中份(50g)、大份(100g)
+ *    - 可调节份量：支持小份、中份、大份
  *    - 食盘防溢出：实时监测食盘重量，超过阈值自动停止投食
  *
  * 2. 智能监测
@@ -23,9 +23,8 @@
  *    - 在线状态：支持WiFi连接，可远程监控设备状态
  *
  * 3. 按键操作
- *    - P0按键：
- *      短按：执行喂食
- *      长按：进入称重校准模式
+ *    - P0按键单击：执行喂食
+ *    - P0按键长按：进入称重校准模式
  *    - ButtonA：切换份量（小份/中份/大份）
  *    - ButtonB：重置储粮量
  *
@@ -50,18 +49,18 @@
 #include "DFRobot_HX711_I2C.h"
 #include "MPython.h"
 #include "DFRobot_Iot.h"
-#include "DFRobot_URM10.h"
 
 // IoT配置
-#define IOT_ID "你的设备ID"
-#define IOT_PWD "你的设备密码"
+#define IOT_SERVER "iot.dfrobot.com.cn" // IoT服务器地址
+#define IOT_ID "Ygr7R3SNg"
+#define IOT_PWD "YR97RqSHRz"
 #define WIFI_SSID "你的WiFi名称"
 #define WIFI_PASSWORD "你的WiFi密码"
 
 // 定义IoT主题
-#define TOPIC_FEED "feeder/cmd/feed"       // 远程喂食指令
-#define TOPIC_PORTION "feeder/cmd/portion" // 远程调整份量
-#define TOPIC_STATUS "feeder/status"       // 状态上报
+#define TOPIC_FEED "_DjYg3IHR"    // 远程喂食指令
+#define TOPIC_PORTION "OM56R3INg" // 远程调整份量
+#define TOPIC_STATUS "Vpueg3INR"  // 状态上报
 
 // 引脚定义 - 掌控板专用引脚命名
 #define BUTTON_PIN P0  // 多功能按钮输入引脚（支持单击/双击/三击/长按）
@@ -74,22 +73,19 @@
 #define HX711_I2C_ADDR 0x64 // DFRobot HX711称重模块I2C地址（使用默认地址）
 
 // 重量相关阈值
-#define MAX_FOOD_WEIGHT 500.0             // 食盆最大重量（克）
-#define MIN_STORAGE_WEIGHT 100.0          // 储粮桶最小重量（克）
-#define LOW_THRESHOLD (PORTION_LARGE * 2) // 缺粮警告阈值
+#define MAX_FOOD_WEIGHT 100.0    // 食盆最大重量（克）
+#define MIN_STORAGE_WEIGHT 100.0 // 储粮桶最小重量（克）
+#define LOW_THRESHOLD 200.0      // 缺粮警告阈值（克）
 
 // 喂食份量定义
-#define PORTION_SMALL 20  // 小份量(g)
-#define PORTION_MEDIUM 50 // 中份量(g)
-#define PORTION_LARGE 100 // 大份量(g)
-#define SERVO_ANGLE 90    // 舵机转动角度
+#define SERVO_ANGLE 90 // 舵机转动角度
 
 // 距离检测相关
 #define MAX_DISTANCE 200      // 超声波最大测量距离(cm)
 #define DISTANCE_THRESHOLD 20 // 宠物检测阈值距离(cm)
 #define PET_ABSENCE_HOURS 12  // 宠物离开警告时间阈值（小时）
 
-// 新增按钮相关常量
+// 按钮相关常量
 #define DEBOUNCE_TIME 50           // 按钮消抖时间(ms)
 #define CLICK_TIMEOUT 500          // 点击超时时间(ms)
 #define LONG_PRESS_TIME 2000       // 长按时间(ms)
@@ -99,11 +95,15 @@
 #define FEEDING_INTERVAL 28800000 // 喂食间隔(8小时 = 8 * 60 * 60 * 1000 ms)
 #define FEEDING_TIMES_PER_DAY 3   // 每天喂食次数
 
+// 喂食相关时间定义
+#define FEED_TIME_MIN 300 // 最小喂食时间(ms)，对应最小份量
+#define FEED_TIME_MAX 800 // 最大喂食时间(ms)，对应最大份量
+
 // 声音模式枚举
 enum SoundPattern
 {
     ALERT_FOOD_LOW,       // 储粮不足警告
-    ALERT_BOWL_FULL,      // 食盆已警告
+    ALERT_BOWL_FULL,      // 食盆已满警告
     ALERT_PET_ABSENT,     // 宠物离开警告
     ALERT_HARDWARE_ERROR, // 硬件错误警告
     SOUND_FEED_SUCCESS,   // 喂食成功提示
@@ -139,30 +139,36 @@ DFRobot_Iot myIot;
 bool isOnline = false;
 unsigned long lastConnectionAttempt = 0;
 
-// 创建URM10对象
-DFRobot_URM10 urm10;
+// 全局时间变量声明
+unsigned long currentMillis = 0;         // 当前时间戳
+unsigned long lastPetVisitTime = 0;      // 上次宠物访问时间
+unsigned long lastVisitMillis = 0;       // 用于检测宠物离开
+unsigned long lastApproachTime = 0;      // 上次接近时间
+unsigned long lastConnectionAttempt = 0; // 上次WiFi连接尝试时间
+
+// 其他全局变量
+int approachCount = 0;           // 接近次数计数
+int reconnectAttempts = 0;       // 重连尝试次数
+#define APPROACH_COOLDOWN 600000 // 接近检测��却时间（10分钟）
 
 // 连接函数
 bool connectToIot()
 {
     if (myIot.wifiConnect(WIFI_SSID, WIFI_PASSWORD))
     {
-        displayMessage("WiFi已连接", "连接IoT中...");
+        displayMessage("WiFi连接", "连接IoT中...");
         delay(1000);
 
-        if (myIot.init(IOT_ID, IOT_PWD))
+        if (myIot.init(IOT_SERVER, IOT_ID, "", IOT_PWD, TOPIC_FEED, TOPIC_PORTION, TOPIC_STATUS, 1883))
         {
             isOnline = true;
-            // 连接成功后订阅主题
-            myIot.subscribe(TOPIC_FEED);
-            myIot.subscribe(TOPIC_PORTION);
             displayMessage("网络已连接", "在线模式");
             return true;
         }
     }
 
     isOnline = false;
-    displayMessage("网络未连接", "离线���式");
+    displayMessage("网络未连接", "离线模式");
     return false;
 }
 
@@ -195,10 +201,10 @@ void displayMessage(const char *line1, const char *line2 = "")
 // 移动喂食相关函数到一起
 void feed()
 {
-    float bowlWeight = bowlScale.readWeight();
+    float initialBowlWeight = bowlScale.readWeight();
     float portionWeight = getCurrentPortionWeight();
 
-    if (bowlWeight >= MAX_FOOD_WEIGHT)
+    if (initialBowlWeight >= MAX_FOOD_WEIGHT)
     {
         playSound(ALERT_BOWL_FULL);
         displayMessage("食盆已满", "暂停投食");
@@ -214,14 +220,35 @@ void feed()
 
     // 执行喂食
     feedServo.write(SERVO_ANGLE);
-    delay(2000);
+    int feedTime = map(portionWeight, PORTION_SMALL, PORTION_LARGE, FEED_TIME_MIN, FEED_TIME_MAX);
+    delay(feedTime);
     feedServo.write(0);
 
-    remainingFood -= portionWeight;
+    // 等待食物完全落下
+    delay(1000);
 
-    playSound(SOUND_FEED_SUCCESS);
-    displayMessage("喂食完成",
-                   String("剩余约: " + String(remainingFood, 1) + "g").c_str());
+    // 测量实际投放重量
+    float finalBowlWeight = bowlScale.readWeight();
+    float actualFeedAmount = finalBowlWeight - initialBowlWeight;
+
+    // 更新剩余储量
+    if (actualFeedAmount > 0)
+    {
+        remainingFood -= actualFeedAmount;
+
+        // 显示实际投放量
+        char feedMsg[32];
+        sprintf(feedMsg, "实际: %.1fg", actualFeedAmount);
+        displayMessage("喂食完成", feedMsg);
+    }
+    else
+    {
+        // 如果没有检测到重量变化，可能是出现故障
+        playSound(ALERT_HARDWARE_ERROR);
+        displayMessage("喂食异常", "请检查设备");
+    }
+
+    delay(2000);
 }
 
 float getCurrentPortionWeight()
@@ -308,7 +335,7 @@ void resetFoodAmount()
 
     delay(2000);
 
-    // 最后一声长响表示完成
+    // 最后一声响表示完成
     digitalWrite(BUZZER_PIN, HIGH);
     delay(500);
     digitalWrite(BUZZER_PIN, LOW);
@@ -320,7 +347,7 @@ void handleButton()
     static bool isLongPress = false;
     static unsigned long pressStartTime = 0;
 
-    // 使用掌控板内建的ButtonA和ButtonB
+    // 用掌控板内建的ButtonA和ButtonB
     if (digitalRead(BUTTON_PIN) == LOW) // 检测P0引脚单击
     {
         if (pressStartTime == 0)
@@ -350,13 +377,11 @@ void handleButton()
         isLongPress = false;
     }
 
-    // 使用ButtonA的单击替代双连击功能
     if (buttonA.isPressed())
     {
         adjustPortion();
     }
 
-    // 使用ButtonB的单击替代三连击功能
     if (buttonB.isPressed())
     {
         resetFoodAmount();
@@ -364,14 +389,9 @@ void handleButton()
 }
 
 // 移动传感器相关函数到一起
-float ultrasonicDistance(int trigPin, int echoPin)
-{
-    float distance = urm10.getDistanceCM();
-    return (distance > 0 && distance < MAX_DISTANCE) ? distance : -1;
-}
-
 void checkPetApproach()
 {
+    // 使用MPython库中的超声波测距函数
     float distance = ultrasonicDistance(TRIG_PIN, ECHO_PIN);
 
     // 如果距离在有效范围内且小于阈值，说明宠物接近
@@ -385,13 +405,14 @@ void checkPetApproach()
 
             // 显示检测到宠物
             displayMessage("检测到宠物",
-                           String("距: " + String(distance, 1) + "cm").c_str());
+                           String("距离: " + String(distance, 1) + "cm").c_str());
         }
     }
 }
 
 void checkPetAbsence()
 {
+    // 使用超声波检测宠物
     float distance = ultrasonicDistance(TRIG_PIN, ECHO_PIN);
     if (distance > 0 && distance < DISTANCE_THRESHOLD)
     {
@@ -436,7 +457,7 @@ void playSound(SoundPattern pattern)
     switch (pattern)
     {
     case ALERT_FOOD_LOW:
-        // 储粮不足：三长音
+        // 储粮不足：三长
         for (int i = 0; i < 3; i++)
         {
             digitalWrite(BUZZER_PIN, HIGH);
@@ -487,7 +508,7 @@ void playSound(SoundPattern pattern)
         break;
 
     case SOUND_FEED_SUCCESS:
-        // 喂食成功：一音
+        // 喂食成功：一短音
         digitalWrite(BUZZER_PIN, HIGH);
         delay(200);
         digitalWrite(BUZZER_PIN, LOW);
@@ -511,33 +532,36 @@ void displayStatus()
 {
     display.fillScreen(0); // 清屏
 
-    // 第一行：时间和在线状态
+    // 第一行：时间和在线状态（限制长度避免溢出）
     char timeStr[32];
-    sprintf(timeStr, "%02d:%02d %s [%s]",
-            (millis() / 3600000) % 24,
-            (millis() / 60000) % 60,
-            getCurrentPortionText(),
-            isOnline ? "在线" : "离线");
+    snprintf(timeStr, sizeof(timeStr), "%02lu:%02lu %s %s",
+             (millis() / 3600000) % 24,
+             (millis() / 60000) % 60,
+             getCurrentPortionText(),
+             isOnline ? "在线" : "离线");
     display.setCursor(0, 0);
     display.print(timeStr);
 
     // 第二行：储粮信息
     char statusStr[32];
-    sprintf(statusStr, "储粮:%dg", (int)remainingFood);
+    snprintf(statusStr, sizeof(statusStr), "储粮:%.1fg", remainingFood);
     display.setCursor(0, 16);
     display.print(statusStr);
 
     // 第三行：宠物状态
     char petStr[32];
-    sprintf(petStr, "上次:%d分钟前", (millis() - lastPetVisitTime) / 60000);
+    unsigned long minutesAgo = lastPetVisitTime > 0 ? (millis() - lastPetVisitTime) / 60000 : 0;
+    snprintf(petStr, sizeof(petStr), "上次:%lu分钟前", minutesAgo);
     display.setCursor(0, 32);
     display.print(petStr);
 
-    // 第四行：简化的网络状态显示
-    if (!isOnline)
+    // 第四行：网络状态（仅在离线时显示重连信息）
+    if (!isOnline && reconnectAttempts > 0)
     {
+        char reconnectStr[32];
+        snprintf(reconnectStr, sizeof(reconnectStr), "重连:%d次", reconnectAttempts);
         display.setCursor(0, 48);
-        display.print("离线模式");
+        display.print(reconnectStr);
     }
 
     display.show(); // 更新显示
@@ -593,6 +617,17 @@ void reportStatus()
     myIot.publish(TOPIC_STATUS, status);
 }
 
+// 添加错误显示函数（之前被引用但未定义）
+void displayError(const char *error)
+{
+    display.fillScreen(0);
+    display.setCursor(0, 0);
+    display.print("错误:");
+    display.setCursor(0, 16);
+    display.print(error);
+    display.show();
+}
+
 // 3. 主程序函数
 void setup()
 {
@@ -600,11 +635,11 @@ void setup()
     Wire.begin();
 
     // 始化显示
-    display.begin()     // 初始化显示
-        display.fill(0) // 清屏
-        display.show()
+    display.begin();       // 初始化显示
+    display.fillScreen(0); // 清屏
+    display.show();
 
-            feedServo.attach(SERVO_PIN);
+    feedServo.attach(SERVO_PIN);
     feedServo.write(0);
 
     while (!bowlScale.begin())
@@ -630,8 +665,11 @@ void setup()
     // 尝试连接Easy IoT
     connectToIot();
 
-    // 初始化URM10
-    urm10.begin(TRIG_PIN, ECHO_PIN);
+    // 初始化时间相关变量
+    lastPetVisitTime = millis();
+    lastVisitMillis = millis();
+    lastApproachTime = millis();
+    lastConnectionAttempt = millis();
 }
 
 void loop()
