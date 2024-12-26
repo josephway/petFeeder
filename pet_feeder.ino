@@ -30,7 +30,7 @@
  * 4. 网络功能
  *    - 远程控制：远程触发喂食和调整份量
  *    - 状态上报：定期上报设备运行状态
- *    - 断线重连：支持自动重连和离线模式切换
+ *    - 断线��连：支持自动重连和离线模式切换
  *
  * 硬件要求：
  * - 掌控板(支持Arduino IDE和Mind+编程环境)
@@ -112,6 +112,7 @@ void displayError(const char *error);
 bool connectToIot();
 void manageConnection();
 void checkFeedingTime();
+void checkBowlWeight();
 
 // 创建对象
 Servo feedServo;
@@ -149,11 +150,18 @@ unsigned long currentMillis = 0; // 当前时间戳
 // unsigned long lastApproachTime = 0; // 上次接近时间
 
 // 其他全局变量
-int approachCount = 0;           // 接近次数计数
 int reconnectAttempts = 0;       // 重连尝试次数
 #define APPROACH_COOLDOWN 600000 // 接近检测却时间（10分钟）
 
-DFRobot_URM10 urm10; // 在全局范围内声明
+// 添加食盘监测相关常量
+#define BOWL_CHECK_INTERVAL 3600000 // 检查食盘重量间隔(1小时)
+#define WEIGHT_CHANGE_THRESHOLD 10  // 重量变化阈值(克)
+#define ALERT_AFTER_HOURS 12        // 多少小时无变化后报警
+
+// 添加食盘监测变量
+float lastBowlWeight = 0.0;
+unsigned long lastWeightChangeTime = 0;
+bool hasAlerted = false;
 
 // 连接函数
 bool connectToIot()
@@ -270,9 +278,9 @@ void feed()
     }
     else
     {
-        // // 如果没有检测到重量变化，可能是出现故障
-        // playSound(ALERT_HARDWARE_ERROR);
-        // displayMessage("喂食异常", "请检查设备");
+        // 如果没有检测到重量变化，可能是出现故障
+        playSound(ALERT_HARDWARE_ERROR);
+        displayMessage("没有出粮", "请检查是否卡粮或储粮空");
     }
 
     // 关闭LED灯
@@ -496,6 +504,45 @@ void displayError(const char *error)
     display.print(error);
 }
 
+// 添加食盘监测函数
+void checkBowlWeight()
+{
+    static unsigned long lastCheckTime = 0;
+    unsigned long currentTime = millis();
+
+    // 每隔一定时间检查一次
+    if (currentTime - lastCheckTime >= BOWL_CHECK_INTERVAL)
+    {
+        lastCheckTime = currentTime;
+
+        float currentWeight = bowlScale.readWeight();
+
+        // 检查重量是否发生显著变化
+        if (abs(currentWeight - lastBowlWeight) > WEIGHT_CHANGE_THRESHOLD)
+        {
+            lastBowlWeight = currentWeight;
+            lastWeightChangeTime = currentTime;
+            hasAlerted = false; // 重置警报状态
+        }
+        // 检查是否超过警报时间
+        else if (!hasAlerted && (currentTime - lastWeightChangeTime) >= (ALERT_AFTER_HOURS * 3600000))
+        {
+            // 发出警报
+            playSound(ALERT_PET_ABSENT);
+            displayMessage("宠物进食异常", "请检查状况!");
+
+            // 如果在线，发送警报
+            if (isOnline)
+            {
+                String alert = "{\"type\":\"alert\",\"message\":\"pet_feeding_abnormal\"}";
+                myIot.publish(TOPIC_STATUS, alert);
+            }
+
+            hasAlerted = true; // 设置已警报标志
+        }
+    }
+}
+
 // 3. 主程序函数
 void setup()
 {
@@ -552,7 +599,7 @@ void loop()
     {
         // processIotMessages();  // 注释掉未使用的函数调用
 
-        // 状态上报
+        // ���态上报
         static unsigned long lastReport = 0;
         if (millis() - lastReport >= 60000)
         {
@@ -568,6 +615,9 @@ void loop()
     checkFeedingTime();
     // checkPetApproach();     // 注释掉未使用的函数调用
     // checkPetAbsence();      // 注释掉未使用的函数调用
+
+    // 替换原有的宠物检测相关代码
+    checkBowlWeight();
 
     delay(100);
 }
