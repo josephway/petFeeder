@@ -30,7 +30,7 @@
  * 4. 网络功能
  *    - 远程控制：远程触发喂食和调整份量
  *    - 状态上报：定期上报设备运行状态
- *    - 断线重连：支持自动重连和离线模式切换
+ *    - 断线连和离线模式切换
  *
  * 硬件要求：
  * - 掌控板(支持Arduino IDE和Mind+编程环境)
@@ -84,6 +84,9 @@
 #define FEEDING_INTERVAL 28800000 // 喂食间隔(8小时 = 8 * 60 * 60 * 1000 ms)
 #define FEEDING_TIMES_PER_DAY 3   // 每天喂食次数
 
+// 按钮去抖动延迟
+#define DEBOUNCE_DELAY 50 // 去抖动延迟时间(ms)
+
 // 声音模式枚举
 enum SoundPattern
 {
@@ -96,6 +99,9 @@ enum SoundPattern
 };
 
 const String topics[1] = {TOPIC_STATUS}; // 减少为单个主题
+
+// 舵机角度
+#define SERVO_ANGLE 90 // 示例角度，您可以根据需要调整
 
 // 函数声明
 void displayMessage(const char *line1, const char *line2 = "");
@@ -112,6 +118,7 @@ void displayError(const char *error);
 bool connectToIot();
 void manageConnection();
 void checkFeedingTime();
+int getCurrentServoAngle();
 
 // 创建对象
 Servo feedServo;
@@ -153,7 +160,10 @@ int approachCount = 0;           // 接近次数计数
 int reconnectAttempts = 0;       // 重连尝试次数
 #define APPROACH_COOLDOWN 600000 // 接近检测却时间（10分钟）
 
-DFRobot_URM10 urm10; // 在全局范围内声明
+DFRobot_URM10 urm10; // 在范围内
+
+// 在全局变量区域添加以下声明
+unsigned long pressStartTime = 0; // 用于记录按钮按下的时间
 
 // 连接函数
 bool connectToIot()
@@ -196,21 +206,20 @@ void manageConnection()
 void displayMessage(const char *line1, const char *line2)
 {
     display.fillScreen(0); // 清屏
-    display.setCursor(0, 0);
-    display.printLine(line1); // 使用 printLine 替代 print
+    display.setCursorLine(1);
+    display.printLine(line1); 
     if (strlen(line2) > 0)
     {
-        display.setCursor(0, 16);
+        display.setCursorLine(2);
         display.printLine(line2);
     }
 }
 
-// 2. 核心功能函数
-// 移动喂食相关函数一起
+// 2. 核心��能函数
+// 移动喂食相关起
 void feed()
 {
     float initialBowlWeight = bowlScale.readWeight();
-    float portionWeight = getCurrentPortionWeight();
 
     if (initialBowlWeight >= MAX_FOOD_WEIGHT)
     {
@@ -229,37 +238,24 @@ void feed()
     // 点亮LED灯
     digitalWrite(LED_PIN, HIGH);
 
-    // 根据份量设置舵机角度
-    int servoAngle;
-    switch (currentPortion)
-    {
-    case SMALL:
-        servoAngle = ANGLE_SMALL;
-        break;
-    case MEDIUM:
-        servoAngle = ANGLE_MEDIUM;
-        break;
-    case LARGE:
-        servoAngle = ANGLE_LARGE;
-        break;
-    default:
-        servoAngle = ANGLE_MEDIUM;
-    }
-
-    // 执行喂食
+    // 根据当前份量调整舵机角度
+    int servoAngle = getCurrentServoAngle();
     feedServo.angle(servoAngle);
-    delay(SERVO_DELAY);
+    delay(SERVO_DELAY); // 保持舵机在该角度一段时间
     feedServo.angle(0);
 
     // 等待食物完全落下
     delay(1000);
+
+    // 关闭LED灯
+    digitalWrite(LED_PIN, LOW);
 
     // 测量实际投放重量
     float finalBowlWeight = bowlScale.readWeight();
     float actualFeedAmount = finalBowlWeight - initialBowlWeight;
 
     // 更新剩余储量
-    if (actualFeedAmount > 0)
+    if (actualFeedAmount > 2)
     {
         remainingFood -= actualFeedAmount;
 
@@ -270,20 +266,17 @@ void feed()
     }
     else
     {
-        // // 如果没有检测到重量变化，可能是出现故障
-        // playSound(ALERT_HARDWARE_ERROR);
-        // displayMessage("喂食异常", "请检查设备");
+        // 如果没有检测到重量变化，可能出现故障
+        playSound(ALERT_HARDWARE_ERROR);
+        displayMessage("没有出粮", "请是否卡粮或储量空");
     }
-
-    // 关闭LED灯
-    digitalWrite(LED_PIN, LOW);
 
     delay(2000);
 }
 
 float getCurrentPortionWeight()
 {
-    // 返回实际测量的重量差值，而不是预设值
+    // 返回实际测量的量差值，而不是预设值
     float initialWeight = bowlScale.readWeight();
     feedServo.angle(getCurrentServoAngle());
     delay(SERVO_DELAY);
@@ -330,7 +323,7 @@ void adjustPortion()
     currentPortion = (FoodPortion)((currentPortion + 1) % 3);
 
     char portionMsg[32];
-    sprintf(portionMsg, "已切换为%s", getCurrentPortionText());
+    sprintf(portionMsg, "切换为%s", getCurrentPortionText());
     displayMessage("份量调整", portionMsg);
 
     playSound(SOUND_PORTION_CHANGE);
@@ -372,17 +365,26 @@ void resetFoodAmount()
 // 移动按钮处理相关函数到一起
 void handleButton()
 {
-    // 检测P8按钮
-    static bool lastButtonState = LOW;
-    bool currentButtonState = digitalRead(BUTTON_PIN);
-
-    if (lastButtonState == HIGH && currentButtonState == LOW)
-    { // 按钮释放时
-        feed();
+    // 检测P8引脚单击（按钮按下高电平）
+    if (digitalRead(BUTTON_PIN) == HIGH)
+    {
+        if (pressStartTime == 0)
+        {
+            pressStartTime = millis();
+        }
     }
-    lastButtonState = currentButtonState;
+    else if (pressStartTime != 0) // 按钮被释放
+    {
+        unsigned long pressDuration = millis() - pressStartTime;
+        if (pressDuration >= DEBOUNCE_DELAY) // 确保按下时间超过去抖动延迟
+        {
+            feed();
+        }
+        // 重置状态
+        pressStartTime = 0;
+    }
 
-    // 处理其他按钮
+    // 理其他按钮
     if (buttonA.isPressed())
     {
         adjustPortion();
@@ -434,41 +436,52 @@ void playSound(SoundPattern pattern)
 // 修改显示函数以包含在线状态
 void displayStatus()
 {
-    static String lastDisplayContent = "";
+    static char lastDisplayContent[256] = ""; // 用于存储上次显示的内容
+    char displayContent[256];
 
-    display.fillScreen(0); // 清屏
-
-    // 分别显示每一行
-    char timeStr[32];
-    snprintf(timeStr, sizeof(timeStr), "时间: %02lu:%02lu",
+    // 组合所有行的内容
+    snprintf(displayContent, sizeof(displayContent),
+             "时间: %02lu:%02lu\n份量: %s\n状态: %s\n储粮剩余: %.1fg",
              (millis() / 3600000) % 24,
-             (millis() / 60000) % 60);
-    display.setCursorLine(0);
-    display.printLine(timeStr);
+             (millis() / 60000) % 60,
+             getCurrentPortionText(),
+             isOnline ? "在线" : "离线",
+             remainingFood);
 
-    char portionStr[32];
-    snprintf(portionStr, sizeof(portionStr), "份量: %s", getCurrentPortionText());
-    display.setCursorLine(1);
-    display.printLine(portionStr);
+    // 仅在显示内容变化时更新显示
+    if (strcmp(lastDisplayContent, displayContent) != 0)
+    {
+        display.fillScreen(0); // 清屏
+        display.setCursorLine(1);
+        display.printLine("时间: " + String((millis() / 3600000) % 24) + ":" + String((millis() / 60000) % 60));
+        display.setCursorLine(2);
+        display.printLine("份量: " + String(getCurrentPortionText()));
+        display.setCursorLine(3);
+        display.printLine("状态: " + String(isOnline ? "在线" : "离线"));
+        display.setCursorLine(4);
+        display.printLine("储粮剩余: " + String(remainingFood) + "g");
+        strcpy(lastDisplayContent, displayContent); // 更新上次显示内容
+    }
 
-    char onlineStr[32];
-    snprintf(onlineStr, sizeof(onlineStr), "状态: %s", isOnline ? "在线" : "离线");
-    display.setCursorLine(2);
-    display.printLine(onlineStr);
-
-    char statusStr[32];
-    snprintf(statusStr, sizeof(statusStr), "储粮剩余: %.1fg", remainingFood);
-    display.setCursorLine(3);
-    display.printLine(statusStr);
-
-    // 仅在离线时显示重连信息
+    // 滚动显示重连信息
     if (!isOnline && reconnectAttempts > 0)
     {
+        static unsigned long lastScrollTime = 0;
+        static int scrollIndex = 0;
         char reconnectStr[32];
         snprintf(reconnectStr, sizeof(reconnectStr), "重连: %d次", reconnectAttempts);
-        display.setCursorLine(4);
-        display.printLine(reconnectStr);
+
+        if (millis() - lastScrollTime > 2000) // 每2秒滚动一次
+        {
+            lastScrollTime = millis();
+            display.fillScreen(0); // 清屏
+            display.setCursorLine(1);
+            display.printLine(reconnectStr + scrollIndex);
+            scrollIndex = (scrollIndex + 1) % strlen(reconnectStr);
+        }
     }
+
+    delay(100); // 增加延迟，防止过于频繁的刷新
 }
 
 // 状态上报函数
@@ -499,6 +512,7 @@ void displayError(const char *error)
 // 3. 主程序函数
 void setup()
 {
+    mPython.begin();
     Serial.begin(115200);
     Wire.begin();
 
@@ -561,13 +575,13 @@ void loop()
         }
     }
 
-    // 更新显示
+    // 新显示
     displayStatus();
 
     // 2. 显示信息
     checkFeedingTime();
     // checkPetApproach();     // 注释掉未使用的函数调用
-    // checkPetAbsence();      // 注释掉未使用的函数调用
+    // checkPetAbsence();      // 注��掉未使用的函数调用
 
     delay(100);
 }
