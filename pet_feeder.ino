@@ -14,31 +14,52 @@
  * 1. 自动喂食
  *    - 定时喂食：每8小时自动投放一次
  *    - 手动喂食：通过按钮触发
- *    - 可调节份量：支持小份、中份、大份
+ *    - 可调节份量：支持小份(30°)、中份(60°)、大份(90°)
  *    - 食盘防溢出：实时监测食盘重量，超过阈值自动停止投食
+ *    - 实时重量监测：记录实际投放量，确保喂食准确性
  *
  * 2. 智能监测
- *    - 储粮监测：通过累计投放量计算剩余量，及时提醒补充
- *    - 宠物监测：通过超声波传感器检测宠物是否正常进食
+ *    - 储粮监测：通过累计投放量计算剩余量，低于阈值及时提醒
+ *    - 进食监测：通过重量变化检测宠物是否正常进食
+ *    - 异常警报：长时间未进食自动报警提醒
  *    - 在线状态：支持WiFi连接，可远程监控设备状态
  *
- * 3. 按键操作
- *    - P8按键单击：执行喂食
- *    - ButtonA：切换份量（小份/中份/大份）
+ * 3. 多模式反馈
+ *    - LED指示：不同颜色显示不同工作状态
+ *      * 绿色：正常工作
+ *      * 黄色：储粮不足
+ *      * 红色：离线状态（呼吸效果）
+ *    - 声光报警：多种模式声光提示
+ *      * 储粮不足：红色闪烁
+ *      * 食盆已满：黄色闪烁
+ *      * 宠物异常：紫色闪烁
+ *      * 硬件错误：红蓝交替
+ *
+ * 4. 操作界面
+ *    - P8按键：执行喂食
+ *    - ButtonA：切换份量（小/中/大）
  *    - ButtonB：重置储粮量
+ *    - OLED显示：
+ *      * 当前时间
+ *      * 距离下次喂食时间
+ *      * 当前份量设置
+ *      * 上次进食时间
+ *      * 在线状态
+ *      * 储粮余量
  *
- * 4. 网络功能
- *    - 远程控制：远程触发喂食和调整份量
+ * 5. 网络功能
  *    - 状态上报：定期上报设备运行状态
- *    - 断线重连：支持自动重连和离线模式切换
+ *    - 自动重连：断线自动重连
+ *    - 离线模式：支持离线运行
  *
- * 硬件要求：
+ * 硬件配置：
  * - 掌控板(支持Arduino IDE和Mind+编程环境)
  * - 舵机（投食机构）
  * - DFRobot_HX711_I2C称重模块
- * - 超声波测距模块（暂未使用）
- * - 蜂鸣器（内置）
- * - WiFi模块（内置）
+ * - 内置蜂鸣器
+ * - 内置RGB LED
+ * - 内置OLED显示屏
+ * - 内置WiFi模块
  */
 
 // 基础库
@@ -103,6 +124,15 @@ const String topics[1] = {TOPIC_STATUS}; // 减少为单个主题
 // 舵机角度
 #define SERVO_ANGLE 90 // 示例角度，您可以根据需要调整
 
+// 添加灯光颜色定义
+#define LED_OFF 0x000000
+#define LED_RED 0xFF0000
+#define LED_GREEN 0x00FF00
+#define LED_BLUE 0x0000FF
+#define LED_YELLOW 0xFFFF00
+#define LED_PURPLE 0xFF00FF
+#define LED_WHITE 0xFFFFFF
+
 // 函数声明
 void displayMessage(const char *line1, const char *line2 = "");
 void playSound(SoundPattern pattern);
@@ -120,6 +150,8 @@ void manageConnection();
 void checkFeedingTime();
 int getCurrentServoAngle();
 void checkBowlWeight();
+void playAlert(SoundPattern pattern);
+void updateStatusLed();
 
 // 创建对象
 Servo feedServo;
@@ -161,9 +193,9 @@ int reconnectAttempts = 0;       // 重连尝试次数
 #define APPROACH_COOLDOWN 600000 // 接近检测却时间（10分钟）
 
 // 添加食盘监测相关常量
-#define BOWL_CHECK_INTERVAL 3600000 // 检查食盘重量间隔(1小时)
-#define WEIGHT_CHANGE_THRESHOLD 10  // 重量变化阈值(克)
-#define ALERT_AFTER_HOURS 12        // 多少小时无变化后报警
+#define BOWL_CHECK_INTERVAL 600000 // 检查食盘重量间隔(10分钟)
+#define WEIGHT_CHANGE_THRESHOLD 10 // 重量变化阈值(克)
+#define ALERT_AFTER_HOURS 12       // 多���小时无变化后报警
 
 // 添加食盘监测变量
 float lastBowlWeight = 0.0;
@@ -220,7 +252,7 @@ void displayMessage(const char *line1, const char *line2)
     }
 }
 
-// 2. 核心功能函数
+// 2. 核心功���函数
 // 移动喂食相关起
 void feed()
 {
@@ -449,14 +481,21 @@ void displayStatus()
     int hoursToFeed = timeToNextFeed / 3600000;
     int minutesToFeed = (timeToNextFeed % 3600000) / 60000;
 
+    // 计算距离上次进食的时间
+    unsigned long timeSinceLastEating = millis() - lastWeightChangeTime;
+    int hoursSinceEating = timeSinceLastEating / 3600000;
+    int minutesSinceEating = (timeSinceLastEating % 3600000) / 60000;
+
     // 组合所有行的内容
     snprintf(displayContent, sizeof(displayContent),
-             "时间: %02lu:%02lu (-%02d:%02d)\n份量: %s\n状态: %s\n储粮剩余: %.1fg",
+             "时间: %02lu:%02lu (-%02d:%02d)\n份量: %s (上次:%02d:%02d)\n状态: %s\n储粮剩余: %.1fg",
              (millis() / 3600000) % 24,
              (millis() / 60000) % 60,
              hoursToFeed,
              minutesToFeed,
              getCurrentPortionText(),
+             hoursSinceEating,
+             minutesSinceEating,
              isOnline ? "在线" : "离线",
              remainingFood);
 
@@ -470,7 +509,9 @@ void displayStatus()
                           String(hoursToFeed) + ":" +
                           (minutesToFeed < 10 ? "0" : "") + String(minutesToFeed) + ")");
         display.setCursorLine(2);
-        display.printLine("份量: " + String(getCurrentPortionText()));
+        display.printLine("份量: " + String(getCurrentPortionText()) +
+                          " (上次:" + String(hoursSinceEating) + ":" +
+                          (minutesSinceEating < 10 ? "0" : "") + String(minutesSinceEating) + ")");
         display.setCursorLine(3);
         display.printLine("状态: " + String(isOnline ? "在线" : "离线"));
         display.setCursorLine(4);
@@ -528,28 +569,47 @@ void displayError(const char *error)
 void checkBowlWeight()
 {
     static unsigned long lastCheckTime = 0;
+    static float previousWeight = 0.0; // 用于记录上次的重量
     unsigned long currentTime = millis();
 
     // 每隔一定时间检查一次
     if (currentTime - lastCheckTime >= BOWL_CHECK_INTERVAL)
     {
         lastCheckTime = currentTime;
-
         float currentWeight = bowlScale.readWeight();
 
-        // 检查重量是否发生显著变化
-        if (abs(currentWeight - lastBowlWeight) > WEIGHT_CHANGE_THRESHOLD)
+        // 首次运行时初始化previousWeight
+        if (previousWeight == 0.0)
         {
-            lastBowlWeight = currentWeight;
+            previousWeight = currentWeight;
+            return;
+        }
+
+        // 计算重量变化
+        float weightChange = currentWeight - previousWeight;
+
+        // 只有当重量减少超过阈值时，才认为是宠物进食
+        if (weightChange < -WEIGHT_CHANGE_THRESHOLD)
+        {
             lastWeightChangeTime = currentTime;
             hasAlerted = false; // 重置警报状态
+
+            // 可选：记录进食量
+            float eatenAmount = -weightChange; // 转为正数
+
+            // 如果在线，可以上报进食记录
+            if (isOnline)
+            {
+                String feedingRecord = "{\"type\":\"feeding\",\"amount\":" + String(eatenAmount) + "}";
+                myIot.publish(TOPIC_STATUS, feedingRecord);
+            }
         }
-        // 检查是否超过警报时间
+        // 检查是否超过警报时间（只在没有检测到进食时）
         else if (!hasAlerted && (currentTime - lastWeightChangeTime) >= (ALERT_AFTER_HOURS * 3600000))
         {
             // 发出警报
             playSound(ALERT_PET_ABSENT);
-            displayMessage("宠物进食异常", "请检查状况!");
+            displayMessage("宠物长时间未进食", "请检查宠物健康状况!");
 
             // 如果在线，发送警报
             if (isOnline)
@@ -560,6 +620,115 @@ void checkBowlWeight()
 
             hasAlerted = true; // 设置已警报标志
         }
+
+        // 更新上次重量记录（不管是增加还是减少）
+        previousWeight = currentWeight;
+    }
+}
+
+// 修改声音和灯光提示函数
+void playAlert(SoundPattern pattern)
+{
+    // 设置较亮的亮度用于提示
+    rgb.brightness(9);
+
+    switch (pattern)
+    {
+    case ALERT_FOOD_LOW:
+        // 储粮不足：红色闪烁 + 声音
+        buzz.freq(262, BEAT_1);
+        rgb.write(-1, LED_RED);
+        delay(200);
+        rgb.write(-1, LED_OFF);
+        delay(200);
+        rgb.write(-1, LED_RED);
+        break;
+
+    case ALERT_BOWL_FULL:
+        // 食盆已满：黄色闪烁 + 声音
+        buzz.freq(330, BEAT_1);
+        rgb.write(-1, LED_YELLOW);
+        delay(200);
+        rgb.write(-1, LED_OFF);
+        delay(200);
+        rgb.write(-1, LED_YELLOW);
+        break;
+
+    case ALERT_PET_ABSENT:
+        // 宠物离开：紫色闪烁 + 声音
+        buzz.freq(392, BEAT_1);
+        rgb.write(-1, LED_PURPLE);
+        delay(200);
+        rgb.write(-1, LED_OFF);
+        delay(200);
+        rgb.write(-1, LED_PURPLE);
+        break;
+
+    case ALERT_HARDWARE_ERROR:
+        // 硬件错误：红蓝交替闪烁 + 声音
+        buzz.freq(523, BEAT_1);
+        rgb.write(-1, LED_RED);
+        delay(150);
+        rgb.write(-1, LED_BLUE);
+        delay(150);
+        rgb.write(-1, LED_RED);
+        break;
+
+    case SOUND_FEED_SUCCESS:
+        // 喂食成功：绿色渐变 + 声音
+        buzz.freq(659, BEAT_1);
+        for (int i = 0; i < 9; i++)
+        {
+            rgb.brightness(i);
+            rgb.write(-1, LED_GREEN);
+            delay(50);
+        }
+        delay(500);
+        rgb.write(-1, LED_OFF);
+        break;
+
+    case SOUND_PORTION_CHANGE:
+        // 份量切换：蓝色闪烁 + 声音
+        buzz.freq(784, BEAT_1);
+        rgb.write(-1, LED_BLUE);
+        delay(500);
+        rgb.write(-1, LED_OFF);
+        delay(200);
+        rgb.write(-1, LED_BLUE);
+        break;
+    }
+
+    // 延迟一段时间后关闭LED
+    delay(1000);
+    rgb.write(-1, LED_OFF);
+    rgb.brightness(5); // 恢复正常亮度
+}
+
+// 修改状态指示灯函数（在displayStatus中调用）
+void updateStatusLed()
+{
+    rgb.brightness(5); // 使用较低亮度作为状态指示
+
+    if (!isOnline)
+    {
+        // 离线状态：呼吸效果的红色
+        static int brightness = 0;
+        static int direction = 1;
+        rgb.brightness(brightness);
+        rgb.write(-1, LED_RED);
+        brightness += direction;
+        if (brightness >= 9 || brightness <= 0)
+            direction *= -1;
+    }
+    else if (remainingFood <= LOW_THRESHOLD)
+    {
+        // 储粮不足：黄色常亮
+        rgb.write(-1, LED_YELLOW);
+    }
+    else
+    {
+        // 正常工作：绿色常亮
+        rgb.write(-1, LED_GREEN);
     }
 }
 
@@ -634,8 +803,7 @@ void loop()
 
     // 2. 显示信息
     checkFeedingTime();
-    // checkPetApproach();     // 注释掉未使用的函数调用
-    // checkPetAbsence();      // 注释掉未使用的函数调用
+    checkBowlWeight(); // 添加食盘监测函数调用
 
     delay(100);
 }
