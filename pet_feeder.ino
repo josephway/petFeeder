@@ -220,7 +220,7 @@ void displayMessage(const char *line1, const char *line2)
     }
 }
 
-// 2. 核心��能函数
+// 2. 核心功能函数
 // 移动喂食相关起
 void feed()
 {
@@ -441,14 +441,21 @@ void playSound(SoundPattern pattern)
 // 修改显示函数以包含在线状态
 void displayStatus()
 {
-    static char lastDisplayContent[256] = ""; // 用于存储上次显示的内容
+    static char lastDisplayContent[256] = "";
     char displayContent[256];
+
+    // 计算距离下次喂食的时间
+    unsigned long timeToNextFeed = FEEDING_INTERVAL - (millis() - lastFeedingTime);
+    int hoursToFeed = timeToNextFeed / 3600000;
+    int minutesToFeed = (timeToNextFeed % 3600000) / 60000;
 
     // 组合所有行的内容
     snprintf(displayContent, sizeof(displayContent),
-             "时间: %02lu:%02lu\n份量: %s\n状态: %s\n储粮剩余: %.1fg",
+             "时间: %02lu:%02lu (-%02d:%02d)\n份量: %s\n状态: %s\n储粮剩余: %.1fg",
              (millis() / 3600000) % 24,
              (millis() / 60000) % 60,
+             hoursToFeed,
+             minutesToFeed,
              getCurrentPortionText(),
              isOnline ? "在线" : "离线",
              remainingFood);
@@ -456,9 +463,12 @@ void displayStatus()
     // 仅在显示内容变化时更新显示
     if (strcmp(lastDisplayContent, displayContent) != 0)
     {
-        display.fillScreen(0); // 清屏
+        display.fillScreen(0);
         display.setCursorLine(1);
-        display.printLine("时间: " + String((millis() / 3600000) % 24) + ":" + String((millis() / 60000) % 60));
+        display.printLine("时间: " + String((millis() / 3600000) % 24) + ":" +
+                          String((millis() / 60000) % 60) + " (-" +
+                          String(hoursToFeed) + ":" +
+                          (minutesToFeed < 10 ? "0" : "") + String(minutesToFeed) + ")");
         display.setCursorLine(2);
         display.printLine("份量: " + String(getCurrentPortionText()));
         display.setCursorLine(3);
@@ -610,7 +620,7 @@ void loop()
     {
         // processIotMessages();  // 注释掉未使用的函数调用
 
-        // ���态上报
+        // 状态上报
         static unsigned long lastReport = 0;
         if (millis() - lastReport >= 60000)
         {
